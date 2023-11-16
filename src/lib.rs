@@ -7,8 +7,9 @@ use std::{ffi::OsString, sync::Arc};
 
 use loop_shared_data::LoopSharedData;
 use smithay::{
+    backend::{renderer::gles::GlesRenderer, winit},
     reexports::{
-        calloop::{generic::Generic, EventLoop, Interest, Mode, PostAction},
+        calloop::{generic::Generic, EventLoop, Interest, LoopHandle, Mode, PostAction},
         wayland_server::{Display, DisplayHandle},
     },
     wayland::socket::ListeningSocketSource,
@@ -20,10 +21,13 @@ pub fn init_wayforge() -> anyhow::Result<(), anyhow::Error> {
     let event_loop: EventLoop<LoopSharedData> =
         EventLoop::try_new().expect("Failed to initialize the event loop.");
 
-    let (display_handle, socket_name) = init_wayland_display(&event_loop)?;
+    let event_loop_handle = event_loop.handle();
 
+    let (display_handle, socket_name) = init_wayland_display(&event_loop_handle)?;
 
+    let _wayforge_state = WayforgeState::new(&display_handle, socket_name, event_loop_handle);
 
+    let (mut backend, mut winit) = winit::init::<GlesRenderer>().unwrap();
 
 
     Ok(())
@@ -31,7 +35,7 @@ pub fn init_wayforge() -> anyhow::Result<(), anyhow::Error> {
 
 /// initialize the display server and add it to the event loop
 fn init_wayland_display(
-    event_loop: &EventLoop<LoopSharedData>,
+    event_loop_handle: &LoopHandle<LoopSharedData>,
 ) -> anyhow::Result<(DisplayHandle, OsString)> {
     let display: Display<WayforgeState> =
         Display::new().expect("Failed to initialize display server");
@@ -45,13 +49,12 @@ fn init_wayland_display(
     let socket_name = socket.socket_name().to_os_string();
 
     // adds wayland clients to the wayland server
-    event_loop
-        .handle()
+    event_loop_handle
         .insert_source(socket, |client_stream, _, shared_data| {
             if let Err(err) = shared_data
                 .wayforge_state
                 .display_handle
-                .insert_client(client_stream, Arc::new(client_data::ClientData))
+                .insert_client(client_stream, Arc::new(client_data::ClientData::default()))
             {
                 tracing::warn!(?err, "Error adding wayland client");
             };
@@ -59,8 +62,7 @@ fn init_wayland_display(
         .with_context(|| "Failed to init the wayland socket source.")?;
 
     // adds the display itself to the event loop as a source
-    event_loop
-        .handle()
+    event_loop_handle
         .insert_source(
             Generic::new(display, Interest::READ, Mode::Level),
             move |_, display, state| {

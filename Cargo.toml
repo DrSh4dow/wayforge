@@ -1,0 +1,21 @@
+[package]
+name = "wayforge"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1.0.156", features = ["derive"] }
+tokio = { version = "1.26.0", features = ["rt-multi-thread", "macros"] }
+toml = "0.8.8"
+xcursor = "0.3.4"
+bitflags = "2.4.1"
+tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
+smithay = { git = "https://github.com/Smithay/smithay", features = [
+  "backend_winit",
+  "wayland_frontend",
+  "desktop",
+] }
+tracing = "0.1.40"
+anyhow = "1.0.75"

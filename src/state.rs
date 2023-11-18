@@ -1,235 +1,163 @@
-use std::{ffi::OsString, os::fd::OwnedFd};
+use std::{ffi::OsString, sync::Arc};
 
 use smithay::{
-    backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
-    desktop::{Space, Window},
-    input::{pointer::CursorImageStatus, Seat, SeatHandler, SeatState},
+    desktop::{PopupManager, Space, Window, WindowSurfaceType},
+    input::{Seat, SeatState},
     reexports::{
-        calloop::LoopHandle,
-        wayland_protocols::xdg::shell::client::xdg_toplevel,
+        calloop::{generic::Generic, EventLoop, Interest, LoopSignal, Mode, PostAction},
         wayland_server::{
-            protocol::{wl_seat, wl_shm, wl_surface::WlSurface},
-            Client, DisplayHandle,
+            backend::{ClientData, ClientId, DisconnectReason},
+            protocol::wl_surface::WlSurface,
+            Display, DisplayHandle,
         },
     },
-    utils::{Clock, Logical, Monotonic, Point, Serial},
+    utils::{Logical, Point},
     wayland::{
-        buffer::BufferHandler,
-        compositor::{with_states, CompositorClientState, CompositorHandler, CompositorState},
-        input_method::PopupSurface,
+        compositor::{CompositorClientState, CompositorState},
         output::OutputManagerState,
-        selection::{
-            data_device::{
-                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
-            },
-            SelectionHandler, SelectionSource, SelectionTarget,
-        },
-        shell::xdg::{
-            PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-            XdgToplevelSurfaceData,
-        },
-        shm::{ShmHandler, ShmState},
+        selection::data_device::DataDeviceState,
+        shell::xdg::XdgShellState,
+        shm::ShmState,
+        socket::ListeningSocketSource,
     },
-    xwayland::{xwm::XwmId, XWaylandClientData},
 };
 
-use crate::{client_data::ClientData, loop_shared_data::LoopSharedData};
+use crate::CalloopData;
 
 pub struct WayforgeState {
-    // extra data to tune the compositor
-    pub clock: Clock<Monotonic>,
-
-    // handlers
+    pub start_time: std::time::Instant,
+    pub socket_name: OsString,
     pub display_handle: DisplayHandle,
 
-    // minimal data needed to run the compositor -- required by smithay
-    pub compositor_state: CompositorState,
-    pub data_device_state: DataDeviceState,
-    pub seat_state: SeatState<Self>,
-    pub shm_state: ShmState,
     pub space: Space<Window>,
-    pub cursor_status: CursorImageStatus,
-    pub pointer_location: Point<f64, Logical>,
-    pub output_manager_state: OutputManagerState,
+    pub loop_signal: LoopSignal,
+
+    // Smithay State
+    pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    pub shm_state: ShmState,
+    pub output_manager_state: OutputManagerState,
+    pub seat_state: SeatState<WayforgeState>,
+    pub data_device_state: DataDeviceState,
+    pub popups: PopupManager,
+
+    pub seat: Seat<Self>,
 }
 
 impl WayforgeState {
-    pub fn new(
-        dh: &DisplayHandle,
-        socket: OsString,
-        event_loop_handle: LoopHandle<LoopSharedData>,
-    ) -> Self {
-        let clock = Clock::new();
-        let compositor_state = CompositorState::new::<Self>(dh);
+    pub fn new(event_loop: &mut EventLoop<CalloopData>, display: Display<Self>) -> Self {
+        let start_time = std::time::Instant::now();
 
-        // shared memory state, used to share surfaces buffers with clients
-        let shm_state =
-            ShmState::new::<Self>(dh, vec![wl_shm::Format::Xbgr8888, wl_shm::Format::Abgr8888]);
-        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(dh);
-        let xdg_shell_state = XdgShellState::new::<Self>(dh);
-        let mut seat_state = SeatState::<Self>::new();
+        let dh = display.handle();
 
-        // A space to map windows on. Keeps track of windows and outputs, can access either with
-        // space.elements() and space.outputs().
-        let space = Space::<Window>::default();
+        let compositor_state = CompositorState::new::<Self>(&dh);
+        let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let shm_state = ShmState::new::<Self>(&dh, vec![]);
+        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
+        let mut seat_state = SeatState::new();
+        let data_device_state = DataDeviceState::new::<Self>(&dh);
+        let popups = PopupManager::default();
 
-        // Manage copy/paste and drag-and-drop from inputs.
-        let data_device_state = DataDeviceState::new::<Self>(dh);
+        // A seat is a group of keyboards, pointer and touch devices.
+        // A seat typically has a pointer and maintains a keyboard focus and a pointer focus.
+        let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
 
-        // Create a new seat from the seat state, we pass in a name .
-        let mut seat: Seat<Self> = seat_state.new_wl_seat(dh, "mwm_seat");
-        // Add a keyboard with repeat rate and delay in milliseconds. The repeat is the time to
-        // repeat, then delay is how long to wait until the next repeat.
-        seat.add_keyboard(Default::default(), 300, 60);
-        // Add pointer to seat.
+        // Notify clients that we have a keyboard, for the sake of the example we assume that keyboard is always present.
+        // You may want to track keyboard hot-plug in real compositor.
+        seat.add_keyboard(Default::default(), 200, 25).unwrap();
+
+        // Notify clients that we have a pointer (mouse)
+        // Here we assume that there is always pointer plugged in
         seat.add_pointer();
 
-        todo!();
-    }
-}
+        // A space represents a two-dimensional plane. Windows and Outputs can be mapped onto it.
+        //
+        // Windows get a position and stacking order through mapping.
+        // Outputs become views of a part of the Space and can be rendered via Space::render_output.
+        let space = Space::default();
 
-impl BufferHandler for WayforgeState {
-    fn buffer_destroyed(
-        &mut self,
-        buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
-    ) {
-    }
-}
+        let socket_name = Self::init_wayland_listener(display, event_loop);
 
-pub fn client_compositor_state<'a>(client: &'a Client) -> &'a CompositorClientState {
-    if let Some(state) = client.get_data::<XWaylandClientData>() {
-        return &state.compositor_state;
-    }
-    if let Some(state) = client.get_data::<ClientData>() {
-        return &state.compositor_client_state;
-    }
-    panic!("Unknown client data type")
-}
+        // Get the loop signal, used to stop the event loop
+        let loop_signal = event_loop.get_signal();
 
-impl CompositorHandler for WayforgeState {
-    fn compositor_state(&mut self) -> &mut CompositorState {
-        &mut self.compositor_state
-    }
+        Self {
+            start_time,
+            display_handle: dh,
 
-    // Called on every buffer commit in Wayland to update a surface. This has the new state of the
-    // surface.
-    fn commit(&mut self, surface: &WlSurface) {
-        // Let Smithay take the surface buffer so that desktop helpers get the new surface state.
-        on_commit_buffer_handler::<Self>(surface);
+            space,
+            loop_signal,
+            socket_name,
 
-        // Find the window with the xdg toplevel surface to update.
-        if let Some(window) = self
-            .space
-            .elements()
-            .find(|w| w.toplevel().wl_surface() == surface)
-            .cloned()
-        {
-            // Refresh the window state.
-            window.on_commit();
-
-            // Find if the window has been configured yet.
-            let initial_configure_sent = with_states(surface, |states| {
-                states
-                    .data_map
-                    .get::<XdgToplevelSurfaceData>()
-                    .unwrap()
-                    .lock()
-                    .unwrap()
-                    .initial_configure_sent
-            });
-
-            if !initial_configure_sent {
-                // Configure window size/attributes.
-                window.toplevel().send_pending_configure();
-            }
+            compositor_state,
+            xdg_shell_state,
+            shm_state,
+            output_manager_state,
+            seat_state,
+            data_device_state,
+            popups,
+            seat,
         }
     }
 
-    fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        client_compositor_state(client)
+    fn init_wayland_listener(
+        display: Display<WayforgeState>,
+        event_loop: &mut EventLoop<CalloopData>,
+    ) -> OsString {
+        // Creates a new listening socket, automatically choosing the next available `wayland` socket name.
+        let listening_socket = ListeningSocketSource::new_auto().unwrap();
+
+        // Get the name of the listening socket.
+        // Clients will connect to this socket.
+        let socket_name = listening_socket.socket_name().to_os_string();
+
+        let handle = event_loop.handle();
+
+        event_loop
+            .handle()
+            .insert_source(listening_socket, move |client_stream, _, state| {
+                // Inside the callback, you should insert the client into the display.
+                //
+                // You may also associate some data with the client when inserting the client.
+                state
+                    .display_handle
+                    .insert_client(client_stream, Arc::new(ClientState::default()))
+                    .unwrap();
+            })
+            .expect("Failed to init the wayland event source.");
+
+        // You also need to add the display itself to the event loop, so that client events will be processed by wayland-server.
+        handle
+            .insert_source(
+                Generic::new(display, Interest::READ, Mode::Level),
+                |_, display, state| {
+                    // Safety: we don't drop the display
+                    unsafe {
+                        display.get_mut().dispatch_clients(&mut state.state).unwrap();
+                    }
+                    Ok(PostAction::Continue)
+                },
+            )
+            .unwrap();
+
+        socket_name
+    }
+
+    pub fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<i32, Logical>)> {
+        self.space.element_under(pos).and_then(|(window, location)| {
+            window
+                .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                .map(|(s, p)| (s, p + location))
+        })
     }
 }
-delegate_compositor!(WayforgeState);
 
-impl SeatHandler for WayforgeState {
-    type KeyboardFocus = WlSurface;
-
-    type PointerFocus = WlSurface;
-
-    fn seat_state(&mut self) -> &mut SeatState<Self> {
-        &mut self.seat_state
-    }
-
-    fn cursor_image(&mut self, _seat: &smithay::input::Seat<Self>, image: CursorImageStatus) {
-        self.cursor_status = image;
-    }
+#[derive(Default)]
+pub struct ClientState {
+    pub compositor_state: CompositorClientState,
 }
-delegate_seat!(WayforgeState);
 
-impl ClientDndGrabHandler for WayforgeState {}
-impl ServerDndGrabHandler for WayforgeState {}
-
-
-impl DataDeviceHandler for WayforgeState {
-    fn data_device_state(&self) -> &DataDeviceState {
-        &self.data_device_state
-    }
+impl ClientData for ClientState {
+    fn initialized(&self, _client_id: ClientId) {}
+    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
-delegate_data_device!(WayforgeState);
-
-impl ShmHandler for WayforgeState {
-    fn shm_state(&self) -> &ShmState {
-        &self.shm_state
-    }
-}
-delegate_shm!(WayforgeState);
-
-impl XdgShellHandler for WayforgeState {
-    fn xdg_shell_state(&mut self) -> &mut XdgShellState {
-        &mut self.xdg_shell_state
-    }
-
-    fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        let window = Window::new(surface);
-
-        // Add the window to the space so we can use it elsewhere in our application, such as the
-        // CompositorHandler.
-        self.workspaces
-            .insert_window(self.workspaces.active(), window.clone());
-        self.space.map_element(window, (0, 0), false);
-
-        // Resize and reposition all the windows.
-        self.workspaces.refresh_geometry(&mut self.space);
-    }
-
-    fn toplevel_destroyed(&mut self, _: ToplevelSurface) {
-        self.workspaces.refresh_geometry(&mut self.space);
-
-        if self.workspaces.is_workspace_empty(self.workspaces.active())
-            && self.cursor_status != CursorImageStatus::Default
-        {
-            self.cursor_status = CursorImageStatus::Default;
-        }
-    }
-
-    fn new_popup(&mut self, _: PopupSurface, _: PositionerState) {}
-
-    fn move_request(&mut self, _: ToplevelSurface, _: wl_seat::WlSeat, _: Serial) {}
-
-    fn resize_request(
-        &mut self,
-        _: ToplevelSurface,
-        _: wl_seat::WlSeat,
-        _: Serial,
-        _: xdg_toplevel::ResizeEdge,
-    ) {
-    }
-
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
-}
-delegate_xdg_shell!(WayforgeState);
-
-delegate_output!(WayforgeState);

@@ -41,7 +41,12 @@ impl XdgShellHandler for WayforgeState {
         let _ = self.popups.track_popup(PopupKind::Xdg(surface));
     }
 
-    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
+    fn reposition_request(
+        &mut self,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
+    ) {
         surface.with_pending_state(|state| {
             // NOTE: This is again a simplification, a proper compositor would
             // calculate the geometry of the popup here. For simplicity we just

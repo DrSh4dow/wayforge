@@ -24,6 +24,7 @@ use smithay::{
 
 use crate::CalloopData;
 
+#[derive(Debug)]
 pub struct WayforgeState {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -64,7 +65,7 @@ impl WayforgeState {
 
         // Notify clients that we have a keyboard, for the sake of the example we assume that keyboard is always present.
         // You may want to track keyboard hot-plug in real compositor.
-        seat.add_keyboard(Default::default(), 200, 25).unwrap();
+        seat.add_keyboard(Default::default(), 300, 60).unwrap();
 
         // Notify clients that we have a pointer (mouse)
         // Here we assume that there is always pointer plugged in
@@ -133,7 +134,10 @@ impl WayforgeState {
                 |_, display, state| {
                     // Safety: we don't drop the display
                     unsafe {
-                        display.get_mut().dispatch_clients(&mut state.state).unwrap();
+                        display
+                            .get_mut()
+                            .dispatch_clients(&mut state.state)
+                            .unwrap();
                     }
                     Ok(PostAction::Continue)
                 },
@@ -143,12 +147,17 @@ impl WayforgeState {
         socket_name
     }
 
-    pub fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<i32, Logical>)> {
-        self.space.element_under(pos).and_then(|(window, location)| {
-            window
-                .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                .map(|(s, p)| (s, p + location))
-        })
+    pub fn surface_under(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<i32, Logical>)> {
+        self.space
+            .element_under(pos)
+            .and_then(|(window, location)| {
+                window
+                    .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                    .map(|(s, p)| (s, p + location))
+            })
     }
 }
 

@@ -1,10 +1,10 @@
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
     },
     input::{
-        keyboard::FilterResult,
+        keyboard::{FilterResult, Keysym},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
@@ -20,14 +20,26 @@ impl WayforgeState {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
 
-                self.seat.get_keyboard().unwrap().input::<(), _>(
+                let press_state = event.state();
+                let action = self.seat.get_keyboard().unwrap().input::<u8, _>(
                     self,
                     event.key_code(),
-                    event.state(),
+                    press_state,
                     serial,
                     time,
-                    |_, _, _| FilterResult::Forward,
+                    |_, _, keysym| match keysym.modified_sym() {
+                        Keysym::t | Keysym::T if press_state == KeyState::Pressed => {
+                            FilterResult::Intercept(1)
+                        }
+                        _ => FilterResult::Forward,
+                    },
                 );
+
+                if Some(1) == action {
+                    std::process::Command::new("weston-terminal")
+                        .spawn()
+                        .unwrap();
+                }
             }
             InputEvent::PointerMotion { .. } => {}
             InputEvent::PointerMotionAbsolute { event, .. } => {
@@ -71,7 +83,11 @@ impl WayforgeState {
                         .map(|(w, l)| (w.clone(), l))
                     {
                         self.space.raise_element(&window, true);
-                        keyboard.set_focus(self, Some(window.toplevel().wl_surface().clone()), serial);
+                        keyboard.set_focus(
+                            self,
+                            Some(window.toplevel().wl_surface().clone()),
+                            serial,
+                        );
                         self.space.elements().for_each(|window| {
                             window.toplevel().send_pending_configure();
                         });
@@ -98,9 +114,9 @@ impl WayforgeState {
             InputEvent::PointerAxis { event, .. } => {
                 let source = event.source();
 
-                let horizontal_amount = event
-                    .amount(Axis::Horizontal)
-                    .unwrap_or_else(|| event.amount_discrete(Axis::Horizontal).unwrap_or(0.0) * 3.0);
+                let horizontal_amount = event.amount(Axis::Horizontal).unwrap_or_else(|| {
+                    event.amount_discrete(Axis::Horizontal).unwrap_or(0.0) * 3.0
+                });
                 let vertical_amount = event
                     .amount(Axis::Vertical)
                     .unwrap_or_else(|| event.amount_discrete(Axis::Vertical).unwrap_or(0.0) * 3.0);

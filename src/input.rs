@@ -36,7 +36,7 @@ impl WayforgeState {
                 );
 
                 if Some(1) == action {
-                    std::process::Command::new("weston-terminal")
+                    std::process::Command::new("kitty")
                         .spawn()
                         .unwrap();
                 }
